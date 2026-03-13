@@ -58,6 +58,7 @@ from telegram.ext import (
     filters,
 )
 
+from .agent_backend import backend
 from .config import config
 from .handlers.callback_data import (
     CB_ASK_DOWN,
@@ -147,15 +148,19 @@ session_monitor: SessionMonitor | None = None
 # Status polling task
 _status_poll_task: asyncio.Task | None = None
 
-# Claude Code commands shown in bot menu (forwarded via tmux)
+# Agent slash commands shown in bot menu (forwarded via tmux)
 CC_COMMANDS: dict[str, str] = {
     "clear": "↗ Clear conversation history",
     "compact": "↗ Compact conversation context",
     "cost": "↗ Show token/cost usage",
-    "help": "↗ Show Claude Code help",
+    "help": f"↗ Show {backend.display_name} help",
     "memory": "↗ Edit CLAUDE.md",
     "model": "↗ Switch AI model",
 }
+
+
+def agent_name() -> str:
+    return backend.display_name
 
 
 async def safe_send_typing_action(update: Update) -> None:
@@ -208,7 +213,7 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     if update.message:
         await safe_reply(
             update.message,
-            "🤖 *Claude Code Monitor*\n\n"
+            f"🤖 *{agent_name()} Monitor*\n\n"
             "Each topic is a session. Create a new topic to start.",
         )
 
@@ -267,7 +272,7 @@ async def screenshot_command(
 
 
 async def unbind_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Unbind this topic from its Claude session without killing the window."""
+    """Unbind this topic from its active agent session without killing the window."""
     user = update.effective_user
     if not user or not is_user_allowed(user.id):
         return
@@ -291,13 +296,13 @@ async def unbind_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     await safe_reply(
         update.message,
         f"✅ Topic unbound from window '{display}'.\n"
-        "The Claude session is still running in tmux.\n"
+        f"The {agent_name()} session is still running in tmux.\n"
         "Send a message to bind to a new session.",
     )
 
 
 async def esc_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Send Escape key to interrupt Claude."""
+    """Send Escape key to interrupt the agent."""
     user = update.effective_user
     if not user or not is_user_allowed(user.id):
         return
@@ -322,7 +327,7 @@ async def esc_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
 
 
 async def usage_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Fetch Claude Code usage stats from TUI and send to Telegram."""
+    """Fetch usage stats from the agent TUI and send to Telegram."""
     user = update.effective_user
     if not user or not is_user_allowed(user.id):
         return
@@ -340,7 +345,7 @@ async def usage_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         await safe_reply(update.message, f"Window '{wid}' no longer exists.")
         return
 
-    # Send /usage command to Claude Code TUI
+    # Send /usage command to the agent TUI
     await tmux_manager.send_keys(w.window_id, "/usage")
     # Wait for the modal to render
     await asyncio.sleep(2.0)
@@ -505,7 +510,7 @@ async def topic_edited_handler(
 async def forward_command_handler(
     update: Update, context: ContextTypes.DEFAULT_TYPE
 ) -> None:
-    """Forward any non-bot command as a slash command to the active Claude Code session."""
+    """Forward any non-bot command as a slash command to the active agent session."""
     user = update.effective_user
     if not user or not is_user_allowed(user.id):
         return
@@ -570,7 +575,7 @@ async def unsupported_content_handler(
     logger.debug("Unsupported content from user %d", user.id)
     await safe_reply(
         update.message,
-        "⚠ Only text, photo, and voice messages are supported. Stickers, video, and other media cannot be forwarded to Claude Code.",
+        f"⚠ Only text, photo, and voice messages are supported. Stickers, video, and other media cannot be forwarded to {agent_name()}.",
     )
 
 
@@ -580,7 +585,7 @@ _IMAGES_DIR.mkdir(parents=True, exist_ok=True)
 
 
 async def photo_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Handle photos sent by the user: download and forward path to Claude Code."""
+    """Handle photos sent by the user: download and forward path to the agent."""
     user = update.effective_user
     if not user or not is_user_allowed(user.id):
         if update.message:
@@ -631,7 +636,7 @@ async def photo_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     file_path = _IMAGES_DIR / filename
     await tg_file.download_to_drive(file_path)
 
-    # Build the message to send to Claude Code
+    # Build the message to send to the agent
     caption = update.message.caption or ""
     if caption:
         text_to_send = f"{caption}\n\n(image attached: {file_path})"
@@ -647,11 +652,11 @@ async def photo_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         return
 
     # Confirm to user
-    await safe_reply(update.message, "📷 Image sent to Claude Code.")
+    await safe_reply(update.message, f"📷 Image sent to {agent_name()}.")
 
 
 async def voice_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Handle voice messages: transcribe via OpenAI and forward text to Claude Code."""
+    """Handle voice messages: transcribe via OpenAI and forward text to the agent."""
     user = update.effective_user
     if not user or not is_user_allowed(user.id):
         if update.message:
@@ -1026,6 +1031,7 @@ async def _create_and_bind_window(
     assert isinstance(query, CallbackQuery)
     assert isinstance(user, User)
 
+    launch_started_at = time.time()
     success, message, created_wname, created_wid = await tmux_manager.create_window(
         selected_path, resume_session_id=resume_session_id
     )
@@ -1039,24 +1045,34 @@ async def _create_and_bind_window(
             pending_thread_id,
             resume_session_id,
         )
-        # Wait for Claude Code's SessionStart hook to register in session_map.
-        # Resume sessions take longer to start (loading session state), so use
-        # a longer timeout to avoid silently dropping messages.
-        hook_timeout = 15.0 if resume_session_id else 5.0
-        hook_ok = await session_manager.wait_for_session_map_entry(
-            created_wid, timeout=hook_timeout
+        # Wait for the backend to register or become discoverable.
+        wait_timeout = 15.0 if resume_session_id else 5.0
+        session_ready = await session_manager.wait_for_backend_session(
+            created_wid,
+            selected_path,
+            created_wname,
+            timeout=wait_timeout,
+            after_timestamp=launch_started_at,
         )
+        pane_ready = await tmux_manager.wait_for_pane_command(
+            created_wid,
+            config.agent_command,
+            timeout=wait_timeout,
+        )
+        if not pane_ready:
+            logger.warning(
+                "Timed out waiting for pane command %s in window %s",
+                config.agent_command,
+                created_wid,
+            )
 
-        # --resume creates a new session_id in the hook, but messages continue
-        # writing to the resumed session's JSONL file. Override window_state to
-        # track the original session_id so the monitor can route messages back.
+        # For resumed sessions, preserve the original session_id so monitoring
+        # continues against the resumed transcript, regardless of backend.
         if resume_session_id:
             ws = session_manager.get_window_state(created_wid)
-            if not hook_ok:
-                # Hook timed out — manually populate window_state so the
-                # monitor can still route messages back to this topic.
+            if not session_ready:
                 logger.warning(
-                    "Hook timed out for resume window %s, "
+                    "Session registration timed out for resume window %s, "
                     "manually setting session_id=%s cwd=%s",
                     created_wid,
                     resume_session_id,
@@ -1832,12 +1848,12 @@ async def post_init(application: Application) -> None:
         BotCommand("start", "Show welcome message"),
         BotCommand("history", "Message history for this topic"),
         BotCommand("screenshot", "Terminal screenshot with control keys"),
-        BotCommand("esc", "Send Escape to interrupt Claude"),
+        BotCommand("esc", f"Send Escape to interrupt {agent_name()}"),
         BotCommand("kill", "Kill session and delete topic"),
         BotCommand("unbind", "Unbind topic from session (keeps window running)"),
-        BotCommand("usage", "Show Claude Code usage remaining"),
+        BotCommand("usage", f"Show {agent_name()} usage remaining"),
     ]
-    # Add Claude Code slash commands
+    # Add agent slash commands
     for cmd_name, desc in CC_COMMANDS.items():
         bot_commands.append(BotCommand(cmd_name, desc))
 
@@ -1926,14 +1942,14 @@ def create_bot() -> Application:
             topic_edited_handler,
         )
     )
-    # Forward any other /command to Claude Code
+    # Forward any other /command to the agent
     application.add_handler(MessageHandler(filters.COMMAND, forward_command_handler))
     application.add_handler(
         MessageHandler(filters.TEXT & ~filters.COMMAND, text_handler)
     )
-    # Photos: download and forward file path to Claude Code
+    # Photos: download and forward file path to the agent
     application.add_handler(MessageHandler(filters.PHOTO, photo_handler))
-    # Voice: transcribe via OpenAI and forward text to Claude Code
+    # Voice: transcribe via OpenAI and forward text to the agent
     application.add_handler(MessageHandler(filters.VOICE, voice_handler))
     # Catch-all: non-text content (stickers, video, etc.)
     application.add_handler(

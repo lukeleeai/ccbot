@@ -1,10 +1,10 @@
-"""Session monitoring service — watches JSONL files for new messages.
+"""Session monitoring service — watches backend session JSONL files for new messages.
 
 Runs an async polling loop that:
   1. Loads the current session_map to know which sessions to watch.
   2. Detects session_map changes (new/changed/deleted windows) and cleans up.
   3. Reads new JSONL lines from each session file using byte-offset tracking.
-  4. Parses entries via TranscriptParser and emits NewMessage objects to a callback.
+  4. Parses entries via the selected backend parser and emits NewMessage objects.
 
 Optimizations: mtime cache skips unchanged files; byte offset avoids re-reading.
 
@@ -20,21 +20,13 @@ from typing import Any, Callable, Awaitable
 
 import aiofiles
 
+from .agent_backend import AgentSession, backend
 from .config import config
 from .monitor_state import MonitorState, TrackedSession
 from .tmux_manager import tmux_manager
-from .transcript_parser import TranscriptParser
 from .utils import read_cwd_from_jsonl
 
 logger = logging.getLogger(__name__)
-
-
-@dataclass
-class SessionInfo:
-    """Information about a Claude Code session."""
-
-    session_id: str
-    file_path: Path
 
 
 @dataclass
@@ -52,7 +44,7 @@ class NewMessage:
 
 
 class SessionMonitor:
-    """Monitors Claude Code sessions for new assistant messages.
+    """Monitors backend sessions for new assistant messages.
 
     Uses simple async polling with aiofiles for non-blocking I/O.
     Emits both intermediate and complete assistant messages.
@@ -65,7 +57,7 @@ class SessionMonitor:
         state_file: Path | None = None,
     ):
         self.projects_path = (
-            projects_path if projects_path is not None else config.claude_projects_path
+            projects_path if projects_path is not None else config.agent_sessions_path
         )
         self.poll_interval = (
             poll_interval if poll_interval is not None else config.monitor_poll_interval
@@ -101,97 +93,12 @@ class SessionMonitor:
                 cwds.add(w.cwd)
         return cwds
 
-    async def scan_projects(self) -> list[SessionInfo]:
-        """Scan projects that have active tmux windows."""
+    async def scan_projects(self) -> list[AgentSession]:
+        """Scan backend session storage for active tmux working directories."""
         active_cwds = await self._get_active_cwds()
         if not active_cwds:
             return []
-
-        sessions = []
-
-        if not self.projects_path.exists():
-            return sessions
-
-        for project_dir in self.projects_path.iterdir():
-            if not project_dir.is_dir():
-                continue
-
-            index_file = project_dir / "sessions-index.json"
-            original_path = ""
-            indexed_ids: set[str] = set()
-
-            if index_file.exists():
-                try:
-                    async with aiofiles.open(index_file, "r") as f:
-                        content = await f.read()
-                    index_data = json.loads(content)
-                    entries = index_data.get("entries", [])
-                    original_path = index_data.get("originalPath", "")
-
-                    for entry in entries:
-                        session_id = entry.get("sessionId", "")
-                        full_path = entry.get("fullPath", "")
-                        project_path = entry.get("projectPath", original_path)
-
-                        if not session_id or not full_path:
-                            continue
-
-                        try:
-                            norm_pp = str(Path(project_path).resolve())
-                        except (OSError, ValueError):
-                            norm_pp = project_path
-                        if norm_pp not in active_cwds:
-                            continue
-
-                        indexed_ids.add(session_id)
-                        file_path = Path(full_path)
-                        if file_path.exists():
-                            sessions.append(
-                                SessionInfo(
-                                    session_id=session_id,
-                                    file_path=file_path,
-                                )
-                            )
-
-                except (json.JSONDecodeError, OSError) as e:
-                    logger.debug(f"Error reading index {index_file}: {e}")
-
-            # Pick up un-indexed .jsonl files
-            try:
-                for jsonl_file in project_dir.glob("*.jsonl"):
-                    session_id = jsonl_file.stem
-                    if session_id in indexed_ids:
-                        continue
-
-                    # Determine project_path for this file
-                    file_project_path = original_path
-                    if not file_project_path:
-                        file_project_path = await asyncio.to_thread(
-                            read_cwd_from_jsonl, jsonl_file
-                        )
-                    if not file_project_path:
-                        dir_name = project_dir.name
-                        if dir_name.startswith("-"):
-                            file_project_path = dir_name.replace("-", "/")
-
-                    try:
-                        norm_fp = str(Path(file_project_path).resolve())
-                    except (OSError, ValueError):
-                        norm_fp = file_project_path
-
-                    if norm_fp not in active_cwds:
-                        continue
-
-                    sessions.append(
-                        SessionInfo(
-                            session_id=session_id,
-                            file_path=jsonl_file,
-                        )
-                    )
-            except OSError as e:
-                logger.debug(f"Error scanning jsonl files in {project_dir}: {e}")
-
-        return sessions
+        return await backend.scan_active_sessions(active_cwds)
 
     async def _read_new_lines(
         self, session: TrackedSession, file_path: Path
@@ -245,7 +152,7 @@ class SessionMonitor:
                 # likely a partial write; stop and retry next cycle.
                 safe_offset = session.last_byte_offset
                 async for line in f:
-                    data = TranscriptParser.parse_line(line)
+                    data = backend.parser.parse_line(line)
                     if data:
                         new_entries.append(data)
                         safe_offset = await f.tell()
@@ -336,7 +243,7 @@ class SessionMonitor:
 
                 # Parse new entries using the shared logic, carrying over pending tools
                 carry = self._pending_tools.get(session_info.session_id, {})
-                parsed_entries, remaining = TranscriptParser.parse_entries(
+                parsed_entries, remaining = backend.parser.parse_entries(
                     new_entries,
                     pending_tools=carry,
                 )

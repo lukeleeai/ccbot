@@ -33,6 +33,11 @@ class TestConfigValid:
         cfg = Config()
         assert cfg.monitor_poll_interval == 5.0
 
+    def test_default_agent_backend_is_claude(self):
+        cfg = Config()
+        assert cfg.agent_backend == "claude"
+        assert cfg.agent_command == "claude"
+
     def test_is_user_allowed_true(self):
         cfg = Config()
         assert cfg.is_user_allowed(12345) is True
@@ -90,6 +95,32 @@ class TestConfigClaudeProjectsPath:
         monkeypatch.setenv("CLAUDE_CONFIG_DIR", "/lower/priority")
         cfg = Config()
         assert cfg.claude_projects_path == Path("/priority/path")
+
+
+@pytest.mark.usefixtures("_base_env")
+class TestConfigCodexBackend:
+    def test_codex_default_sessions_path(self, monkeypatch):
+        monkeypatch.setenv("CCBOT_AGENT_BACKEND", "codex")
+        monkeypatch.delenv("CCBOT_CODEX_HOME", raising=False)
+        monkeypatch.delenv("CODEX_HOME", raising=False)
+        cfg = Config()
+        assert cfg.agent_backend == "codex"
+        assert cfg.agent_command == "codex"
+        assert cfg.agent_sessions_path == Path.home() / ".codex" / "sessions"
+
+    def test_custom_codex_home(self, monkeypatch):
+        monkeypatch.setenv("CCBOT_AGENT_BACKEND", "codex")
+        monkeypatch.setenv("CCBOT_CODEX_HOME", "/tmp/codex-home")
+        cfg = Config()
+        assert cfg.agent_sessions_path == Path("/tmp/codex-home") / "sessions"
+
+    def test_custom_codex_command(self, monkeypatch):
+        monkeypatch.setenv("CCBOT_AGENT_BACKEND", "codex")
+        monkeypatch.setenv(
+            "CODEX_COMMAND", "codex --dangerously-bypass-approvals-and-sandbox"
+        )
+        cfg = Config()
+        assert cfg.agent_command == "codex --dangerously-bypass-approvals-and-sandbox"
 
 
 @pytest.mark.usefixtures("_base_env")

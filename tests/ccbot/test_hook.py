@@ -1,4 +1,4 @@
-"""Tests for Claude Code session tracking hook."""
+"""Tests for session tracking hook behavior."""
 
 import io
 import json
@@ -6,7 +6,7 @@ import sys
 
 import pytest
 
-from ccbot.hook import _UUID_RE, _is_hook_installed, hook_main
+from ccbot.hook import _UUID_RE, _install_hook, _is_hook_installed, hook_main
 
 
 class TestUuidRegex:
@@ -144,3 +144,12 @@ class TestHookMainValidation:
             },
         )
         assert not (tmp_path / "session_map.json").exists()
+
+
+class TestCodexHookBehavior:
+    def test_codex_install_is_noop(self, monkeypatch, capsys) -> None:
+        monkeypatch.setenv("CCBOT_AGENT_BACKEND", "codex")
+        rc = _install_hook()
+        captured = capsys.readouterr()
+        assert rc == 0
+        assert "does not use a SessionStart hook" in captured.out

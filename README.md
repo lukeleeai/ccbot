@@ -3,7 +3,7 @@
 [中文文档](README_CN.md)
 [Русская документация](README_RU.md)
 
-Control Claude Code sessions remotely via Telegram — monitor, interact, and manage AI coding sessions running in tmux.
+Control interactive coding agent sessions remotely via Telegram — monitor, interact, and manage tmux-backed Claude Code or Codex sessions.
 
 https://github.com/user-attachments/assets/15ffb38e-5eb9-4720-93b9-412e4961dc93
 
@@ -92,7 +92,10 @@ ALLOWED_USERS=your_telegram_user_id
 | ----------------------- | ---------- | ------------------------------------------------ |
 | `CCBOT_DIR`             | `~/.ccbot` | Config/state directory (`.env` loaded from here) |
 | `TMUX_SESSION_NAME`     | `ccbot`    | Tmux session name                                |
-| `CLAUDE_COMMAND`        | `claude`   | Command to run in new windows                    |
+| `CCBOT_AGENT_BACKEND`   | `claude`   | Agent backend: `claude` or `codex`               |
+| `CLAUDE_COMMAND`        | `claude`   | Command to run in new windows for Claude backend |
+| `CODEX_COMMAND`         | `codex`    | Command to run in new windows for Codex backend  |
+| `CCBOT_CODEX_HOME`      | `~/.codex` | Codex config/session root override               |
 | `MONITOR_POLL_INTERVAL` | `2.0`      | Polling interval in seconds                      |
 | `CCBOT_SHOW_HIDDEN_DIRS` | `false` | Show hidden (dot) directories in directory browser |
 | `OPENAI_API_KEY` | _(none)_ | OpenAI API key for voice message transcription |
@@ -101,13 +104,23 @@ ALLOWED_USERS=your_telegram_user_id
 Message formatting is always HTML via `chatgpt-md-converter` (`chatgpt_md_converter` package).
 There is no runtime formatter switch to MarkdownV2.
 
-> If running on a VPS where there's no interactive terminal to approve permissions, consider:
+> If running the Claude backend on a VPS where there's no interactive terminal to approve permissions, consider:
 >
 > ```
 > CLAUDE_COMMAND=IS_SANDBOX=1 claude --dangerously-skip-permissions
 > ```
 
-## Hook Setup (Recommended)
+> For Codex in fully unguarded mode:
+>
+> ```
+> CCBOT_AGENT_BACKEND=codex
+> CODEX_COMMAND=codex --dangerously-bypass-approvals-and-sandbox --no-alt-screen
+> ```
+
+## Hook Setup
+
+The Claude backend uses a `SessionStart` hook for exact window-to-session registration.
+The Codex backend does not use hooks; it discovers sessions from `~/.codex/sessions`.
 
 Auto-install via CLI:
 
@@ -129,7 +142,7 @@ Or manually add to `~/.claude/settings.json`:
 }
 ```
 
-This writes window-session mappings to `$CCBOT_DIR/session_map.json` (`~/.ccbot/` by default), so the bot automatically tracks which Claude session is running in each tmux window — even after `/clear` or session restarts.
+For Claude, this writes window-session mappings to `$CCBOT_DIR/session_map.json` (`~/.ccbot/` by default), so the bot automatically tracks which session is running in each tmux window — even after `/clear` or session restarts.
 
 ## Usage
 
@@ -152,17 +165,17 @@ uv run ccbot
 | `/screenshot` | Capture terminal screenshot     |
 | `/esc`        | Send Escape to interrupt Claude |
 
-**Claude Code commands (forwarded via tmux):**
+**Agent commands (forwarded via tmux):**
 
 | Command    | Description                  |
 | ---------- | ---------------------------- |
 | `/clear`   | Clear conversation history   |
 | `/compact` | Compact conversation context |
 | `/cost`    | Show token/cost usage        |
-| `/help`    | Show Claude Code help        |
+| `/help`    | Show agent help              |
 | `/memory`  | Edit CLAUDE.md               |
 
-Any unrecognized `/command` is also forwarded to Claude Code as-is (e.g. `/review`, `/doctor`, `/init`).
+Any unrecognized `/command` is also forwarded to the running agent as-is (e.g. `/review`, `/doctor`, `/init`).
 
 ### Topic Workflow
 
@@ -173,12 +186,12 @@ Any unrecognized `/command` is also forwarded to Claude Code as-is (e.g. `/revie
 1. Create a new topic in the Telegram group
 2. Send any message in the topic
 3. A directory browser appears — select the project directory
-4. If the directory has existing Claude sessions, a session picker appears — choose one to resume or start fresh
-5. A tmux window is created, `claude` starts (with `--resume` if resuming), and your pending message is forwarded
+4. If the directory has existing sessions for the selected backend, a session picker appears — choose one to resume or start fresh
+5. A tmux window is created, the selected agent starts (with backend-specific resume if applicable), and your pending message is forwarded
 
 **Sending messages:**
 
-Once a topic is bound to a session, just send text or voice messages in that topic — text gets forwarded to Claude Code via tmux keystrokes, and voice messages are automatically transcribed and forwarded as text.
+Once a topic is bound to a session, just send text or voice messages in that topic — text gets forwarded to the selected agent via tmux keystrokes, and voice messages are automatically transcribed and forwarded as text.
 
 **Killing a session:**
 
@@ -206,7 +219,7 @@ I'll look into the login bug...
 
 The monitor polls session JSONL files every 2 seconds and sends notifications for:
 
-- **Assistant responses** — Claude's text replies
+- **Assistant responses** — agent text replies
 - **Thinking content** — Shown as expandable blockquotes
 - **Tool use/result** — Summarized with stats (e.g. "Read 42 lines", "Found 5 matches")
 - **Local command output** — stdout from commands like `git status`, prefixed with `❯ command_name`
@@ -217,7 +230,7 @@ Formatting note:
 - Telegram messages are rendered with parse mode `HTML` using `chatgpt-md-converter`
 - Long messages are split with HTML tag awareness to preserve code blocks and formatting
 
-## Running Claude Code in tmux
+## Running the Agent in tmux
 
 ### Option 1: Create via Telegram (Recommended)
 
@@ -230,11 +243,11 @@ Formatting note:
 ```bash
 tmux attach -t ccbot
 tmux new-window -n myproject -c ~/Code/myproject
-# Then start Claude Code in the new window
+# Then start the agent in the new window
 claude
 ```
 
-The window must be in the `ccbot` tmux session (configurable via `TMUX_SESSION_NAME`). The hook will automatically register it in `session_map.json` when Claude starts.
+The window must be in the `ccbot` tmux session (configurable via `TMUX_SESSION_NAME`). For Claude, the hook will automatically register it in `session_map.json` when it starts. For Codex, the bot discovers the session from `~/.codex/sessions`.
 
 ## Data Storage
 
@@ -243,7 +256,8 @@ The window must be in the `ccbot` tmux session (configurable via `TMUX_SESSION_N
 | `$CCBOT_DIR/state.json`         | Thread bindings, window states, display names, and per-user read offsets |
 | `$CCBOT_DIR/session_map.json`   | Hook-generated `{tmux_session:window_id: {session_id, cwd, window_name}}` mappings |
 | `$CCBOT_DIR/monitor_state.json` | Monitor byte offsets per session (prevents duplicate notifications)     |
-| `~/.claude/projects/`           | Claude Code session data (read-only)                                    |
+| `~/.claude/projects/`           | Claude session data for the Claude backend                              |
+| `~/.codex/sessions/`            | Codex session data for the Codex backend                                |
 
 ## File Structure
 
@@ -257,7 +271,9 @@ src/ccbot/
 ├── session.py             # Session management, state persistence, message history
 ├── session_monitor.py     # JSONL file monitoring (polling + change detection)
 ├── monitor_state.py       # Monitor state persistence (byte offsets)
-├── transcript_parser.py   # Claude Code JSONL transcript parsing
+├── transcript_parser.py   # Claude transcript parsing
+├── codex_transcript_parser.py # Codex transcript parsing
+├── agent_backend.py       # Backend-specific command/session discovery
 ├── terminal_parser.py     # Terminal pane parsing (interactive UI + status line)
 ├── html_converter.py      # Markdown → Telegram HTML conversion + HTML-aware splitting
 ├── screenshot.py          # Terminal text → PNG image with ANSI color support

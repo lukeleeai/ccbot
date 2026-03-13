@@ -15,11 +15,13 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import shlex
 from dataclasses import dataclass
 from pathlib import Path
 
 import libtmux
 
+from .agent_backend import backend
 from .config import SENSITIVE_ENV_VARS, config
 
 logger = logging.getLogger(__name__)
@@ -324,6 +326,28 @@ class TmuxManager:
 
         return await asyncio.to_thread(_sync_send_keys)
 
+    async def wait_for_pane_command(
+        self,
+        window_id: str,
+        expected_command: str,
+        *,
+        timeout: float = 10.0,
+        interval: float = 0.5,
+    ) -> bool:
+        """Wait until the active pane's current command matches the expected binary."""
+        try:
+            target = Path(shlex.split(expected_command)[0]).name
+        except (IndexError, ValueError):
+            return False
+
+        deadline = asyncio.get_event_loop().time() + timeout
+        while asyncio.get_event_loop().time() < deadline:
+            window = await self.find_window_by_id(window_id)
+            if window and window.pane_current_command == target:
+                return True
+            await asyncio.sleep(interval)
+        return False
+
     async def rename_window(self, window_id: str, new_name: str) -> bool:
         """Rename a tmux window by its ID."""
 
@@ -418,9 +442,9 @@ class TmuxManager:
                 if start_claude:
                     pane = window.active_pane
                     if pane:
-                        cmd = config.claude_command
+                        cmd = config.agent_command
                         if resume_session_id:
-                            cmd = f"{cmd} --resume {resume_session_id}"
+                            cmd = backend.build_resume_command(cmd, resume_session_id)
                         pane.send_keys(cmd, enter=True)
 
                 logger.info(

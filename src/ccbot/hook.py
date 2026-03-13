@@ -33,6 +33,10 @@ _CLAUDE_SETTINGS_FILE = Path.home() / ".claude" / "settings.json"
 _HOOK_COMMAND_SUFFIX = "ccbot hook"
 
 
+def _agent_backend() -> str:
+    return os.getenv("CCBOT_AGENT_BACKEND", "claude").strip().lower()
+
+
 def _find_ccbot_path() -> str:
     """Find the full path to the ccbot executable.
 
@@ -83,6 +87,10 @@ def _install_hook() -> int:
 
     Returns 0 on success, 1 on error.
     """
+    if _agent_backend() == "codex":
+        print("Codex backend does not use a SessionStart hook; nothing to install.")
+        return 0
+
     settings_file = _CLAUDE_SETTINGS_FILE
     settings_file.parent.mkdir(parents=True, exist_ok=True)
 
@@ -155,6 +163,10 @@ def hook_main() -> None:
     if args.install:
         logger.info("Hook install requested")
         sys.exit(_install_hook())
+
+    if _agent_backend() == "codex":
+        logger.debug("Ignoring hook event for codex backend")
+        return
 
     # Normal hook processing: read JSON from stdin
     logger.debug("Processing hook event from stdin")

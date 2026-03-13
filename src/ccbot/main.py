@@ -48,7 +48,8 @@ def main() -> None:
     from .tmux_manager import tmux_manager
 
     logger.info("Allowed users: %s", config.allowed_users)
-    logger.info("Claude projects path: %s", config.claude_projects_path)
+    logger.info("Agent backend: %s", config.agent_backend)
+    logger.info("Agent sessions path: %s", config.agent_sessions_path)
 
     # Ensure tmux session exists
     session = tmux_manager.get_or_create_session()

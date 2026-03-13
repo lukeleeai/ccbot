@@ -18,7 +18,7 @@ from .utils import ccbot_dir
 
 logger = logging.getLogger(__name__)
 
-# Env vars that must not leak to child processes (e.g. Claude Code via tmux)
+# Env vars that must not leak to child processes (e.g. agent CLIs via tmux)
 SENSITIVE_ENV_VARS = {"TELEGRAM_BOT_TOKEN", "ALLOWED_USERS", "OPENAI_API_KEY"}
 
 
@@ -61,26 +61,46 @@ class Config:
         self.tmux_session_name = os.getenv("TMUX_SESSION_NAME", "ccbot")
         self.tmux_main_window_name = "__main__"
 
-        # Claude command to run in new windows
-        self.claude_command = os.getenv("CLAUDE_COMMAND", "claude")
+        self.agent_backend = os.getenv("CCBOT_AGENT_BACKEND", "claude").strip().lower()
+        if self.agent_backend not in {"claude", "codex"}:
+            raise ValueError(
+                "CCBOT_AGENT_BACKEND must be 'claude' or 'codex', "
+                f"got: {self.agent_backend!r}"
+            )
+
+        default_command = "claude" if self.agent_backend == "claude" else "codex"
+        command_env = "CLAUDE_COMMAND" if self.agent_backend == "claude" else "CODEX_COMMAND"
+        self.agent_command = os.getenv(command_env, default_command)
+        # Backward-compatible alias for existing code paths/tests/docs.
+        self.claude_command = self.agent_command
 
         # All state files live under config_dir
         self.state_file = self.config_dir / "state.json"
         self.session_map_file = self.config_dir / "session_map.json"
         self.monitor_state_file = self.config_dir / "monitor_state.json"
 
-        # Claude Code session monitoring configuration
-        # Support custom projects path for Claude variants (e.g., cc-mirror, zai)
-        # Priority: CCBOT_CLAUDE_PROJECTS_PATH > CLAUDE_CONFIG_DIR/projects > default
+        # Agent session storage roots differ by backend.
         custom_projects_path = os.getenv("CCBOT_CLAUDE_PROJECTS_PATH")
         claude_config_dir = os.getenv("CLAUDE_CONFIG_DIR")
+        custom_codex_home = os.getenv("CCBOT_CODEX_HOME") or os.getenv("CODEX_HOME")
 
-        if custom_projects_path:
-            self.claude_projects_path = Path(custom_projects_path)
-        elif claude_config_dir:
-            self.claude_projects_path = Path(claude_config_dir) / "projects"
+        if self.agent_backend == "claude":
+            if custom_projects_path:
+                self.agent_sessions_path = Path(custom_projects_path)
+            elif claude_config_dir:
+                self.agent_sessions_path = Path(claude_config_dir) / "projects"
+            else:
+                self.agent_sessions_path = Path.home() / ".claude" / "projects"
         else:
-            self.claude_projects_path = Path.home() / ".claude" / "projects"
+            codex_home = (
+                Path(custom_codex_home)
+                if custom_codex_home
+                else Path.home() / ".codex"
+            )
+            self.agent_sessions_path = codex_home / "sessions"
+
+        # Backward-compatible alias for Claude-centric call sites.
+        self.claude_projects_path = self.agent_sessions_path
 
         self.monitor_poll_interval = float(os.getenv("MONITOR_POLL_INTERVAL", "2.0"))
 
@@ -108,12 +128,13 @@ class Config:
 
         logger.debug(
             "Config initialized: dir=%s, token=%s..., allowed_users=%d, "
-            "tmux_session=%s, claude_projects_path=%s",
+            "tmux_session=%s, agent_backend=%s, agent_sessions_path=%s",
             self.config_dir,
             self.telegram_bot_token[:8],
             len(self.allowed_users),
             self.tmux_session_name,
-            self.claude_projects_path,
+            self.agent_backend,
+            self.agent_sessions_path,
         )
 
     def is_user_allowed(self, user_id: int) -> bool:

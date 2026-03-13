@@ -1,4 +1,4 @@
-"""Claude Code session management — the core state hub.
+"""Agent session management — the core state hub.
 
 Manages the key mappings:
   Window→Session (window_states): which Claude session_id a window holds (keyed by window_id).
@@ -7,7 +7,7 @@ Manages the key mappings:
 Responsibilities:
   - Persist/load state to ~/.ccbot/state.json.
   - Sync window↔session bindings from session_map.json (written by hook).
-  - Resolve window IDs to ClaudeSession objects (JSONL file reading).
+  - Resolve window IDs to agent sessions (JSONL file reading).
   - Track per-user read offsets for unread-message detection.
   - Manage thread↔window bindings for Telegram topic routing.
   - Send keystrokes to tmux windows and retrieve message history.
@@ -32,9 +32,9 @@ from typing import Any
 
 import aiofiles
 
+from .agent_backend import AgentSession, backend
 from .config import config
 from .tmux_manager import tmux_manager
-from .transcript_parser import TranscriptParser
 from .utils import atomic_write_json
 
 logger = logging.getLogger(__name__)
@@ -73,18 +73,8 @@ class WindowState:
 
 
 @dataclass
-class ClaudeSession:
-    """Information about a Claude Code session."""
-
-    session_id: str
-    summary: str
-    message_count: int
-    file_path: str
-
-
-@dataclass
 class SessionManager:
-    """Manages session state for Claude Code.
+    """Manages session state for the selected agent backend.
 
     All internal keys use window_id (e.g. '@0', '@12') for uniqueness.
     Display names (window_name) are stored separately for UI presentation.
@@ -574,125 +564,22 @@ class SessionManager:
         logger.info("Cleared session for window_id %s", window_id)
 
     @staticmethod
-    def _encode_cwd(cwd: str) -> str:
-        """Encode a cwd path to match Claude Code's project directory naming.
-
-        Replaces all non-alphanumeric characters (except dash) with dashes.
-        E.g. /home/user_name/Code/project -> -home-user-name-Code-project
-        """
-        return re.sub(r"[^a-zA-Z0-9-]", "-", cwd)
-
-    def _build_session_file_path(self, session_id: str, cwd: str) -> Path | None:
-        """Build the direct file path for a session from session_id and cwd."""
-        if not session_id or not cwd:
-            return None
-        encoded_cwd = self._encode_cwd(cwd)
-        return config.claude_projects_path / encoded_cwd / f"{session_id}.jsonl"
-
-    async def _get_session_direct(
-        self, session_id: str, cwd: str
-    ) -> ClaudeSession | None:
-        """Get a ClaudeSession directly from session_id and cwd (no scanning)."""
-        file_path = self._build_session_file_path(session_id, cwd)
-
-        # Fallback: glob search if direct path doesn't exist
-        if not file_path or not file_path.exists():
-            pattern = f"*/{session_id}.jsonl"
-            matches = list(config.claude_projects_path.glob(pattern))
-            if matches:
-                file_path = matches[0]
-                logger.debug("Found session via glob: %s", file_path)
-            else:
-                return None
-
-        # Single pass: read file once, extract summary + count messages
-        summary = ""
-        last_user_msg = ""
-        message_count = 0
-        try:
-            async with aiofiles.open(file_path, "r", encoding="utf-8") as f:
-                async for line in f:
-                    line = line.strip()
-                    if not line:
-                        continue
-                    message_count += 1
-                    try:
-                        data = json.loads(line)
-                        # Check for summary
-                        if data.get("type") == "summary":
-                            s = data.get("summary", "")
-                            if s:
-                                summary = s
-                        # Track last user message as fallback
-                        elif TranscriptParser.is_user_message(data):
-                            parsed = TranscriptParser.parse_message(data)
-                            if parsed and parsed.text.strip():
-                                last_user_msg = parsed.text.strip()
-                    except json.JSONDecodeError:
-                        continue
-        except OSError:
-            return None
-
-        if not summary:
-            summary = last_user_msg[:50] if last_user_msg else "Untitled"
-
-        return ClaudeSession(
-            session_id=session_id,
-            summary=summary,
-            message_count=message_count,
-            file_path=str(file_path),
-        )
-
     # --- Directory session listing ---
 
-    async def list_sessions_for_directory(self, cwd: str) -> list[ClaudeSession]:
-        """List existing Claude sessions for a directory.
-
-        Encodes the cwd path to find the project directory under
-        ~/.claude/projects/{encoded_cwd}/, globs *.jsonl files, and
-        extracts summary info from each.
-
-        Returns a list sorted by mtime (most recent first), capped at 10.
-        """
-        encoded_cwd = self._encode_cwd(cwd)
-        project_dir = config.claude_projects_path / encoded_cwd
-        if not project_dir.is_dir():
-            return []
-
-        # Collect JSONL files sorted by mtime (newest first)
-        jsonl_files = sorted(
-            project_dir.glob("*.jsonl"),
-            key=lambda p: p.stat().st_mtime,
-            reverse=True,
-        )
-
-        # Skip sessions-index and cap at 10
-        sessions: list[ClaudeSession] = []
-        for f in jsonl_files:
-            if f.stem == "sessions-index":
-                continue
-            if len(sessions) >= 10:
-                break
-            session_id = f.stem
-            session = await self._get_session_direct(session_id, cwd)
-            if session and session.message_count > 0:
-                sessions.append(session)
-        return sessions
+    async def list_sessions_for_directory(self, cwd: str) -> list[AgentSession]:
+        """List existing agent sessions for a directory."""
+        return await backend.list_sessions_for_directory(cwd)
 
     # --- Window → Session resolution ---
 
-    async def resolve_session_for_window(self, window_id: str) -> ClaudeSession | None:
-        """Resolve a tmux window to the best matching Claude session.
-
-        Uses persisted session_id + cwd to construct file path directly.
-        Returns None if no session is associated with this window.
-        """
+    async def resolve_session_for_window(self, window_id: str) -> AgentSession | None:
+        """Resolve a tmux window to the best matching backend session."""
         state = self.get_window_state(window_id)
 
         if not state.session_id or not state.cwd:
             return None
 
-        session = await self._get_session_direct(state.session_id, state.cwd)
+        session = await backend.get_session(state.session_id, state.cwd)
         if session:
             return session
 
@@ -707,6 +594,51 @@ class SessionManager:
         state.cwd = ""
         self._save_state()
         return None
+
+    async def wait_for_backend_session(
+        self,
+        window_id: str,
+        cwd: str,
+        window_name: str,
+        *,
+        timeout: float = 5.0,
+        interval: float = 0.5,
+        after_timestamp: float | None = None,
+    ) -> bool:
+        """Wait for a backend session association to become discoverable."""
+        if backend.supports_hook:
+            return await self.wait_for_session_map_entry(
+                window_id, timeout=timeout, interval=interval
+            )
+
+        deadline = asyncio.get_event_loop().time() + timeout
+        threshold = after_timestamp or 0.0
+        while asyncio.get_event_loop().time() < deadline:
+            session = await backend.discover_new_session(
+                cwd, after_timestamp=threshold
+            )
+            if session:
+                ws = self.get_window_state(window_id)
+                ws.session_id = session.session_id
+                ws.cwd = session.cwd or cwd
+                ws.window_name = window_name
+                self.window_display_names[window_id] = window_name
+                self._save_state()
+                logger.info(
+                    "Discovered %s session for window %s: %s",
+                    backend.display_name,
+                    window_id,
+                    session.session_id,
+                )
+                return True
+            await asyncio.sleep(interval)
+
+        logger.warning(
+            "Timed out waiting for %s session discovery: window_id=%s",
+            backend.display_name,
+            window_id,
+        )
+        return False
 
     # --- User window offset management ---
 
@@ -869,14 +801,14 @@ class SessionManager:
                     if not line:
                         break
 
-                    data = TranscriptParser.parse_line(line)
+                    data = backend.parser.parse_line(line)
                     if data:
                         entries.append(data)
         except OSError as e:
             logger.error("Error reading session file %s: %s", file_path, e)
             return [], 0
 
-        parsed_entries, _ = TranscriptParser.parse_entries(entries)
+        parsed_entries, _ = backend.parser.parse_entries(entries)
         all_messages = [
             {
                 "role": e.role,

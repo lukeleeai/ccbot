@@ -19,7 +19,7 @@ from pathlib import Path
 
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup
 
-from ..session import ClaudeSession
+from ..agent_backend import AgentSession
 
 from ..config import config
 from .callback_data import (
@@ -48,7 +48,7 @@ BROWSE_PAGE_KEY = "browse_page"
 BROWSE_DIRS_KEY = "browse_dirs"  # Cache of subdirs for current path
 UNBOUND_WINDOWS_KEY = "unbound_windows"  # Cache of (name, cwd) tuples
 STATE_SELECTING_SESSION = "selecting_session"
-SESSIONS_KEY = "cached_sessions"  # Cache of ClaudeSession list
+SESSIONS_KEY = "cached_sessions"  # Cache of AgentSession list
 
 
 def clear_browse_state(user_data: dict | None) -> None:
@@ -213,12 +213,12 @@ def _relative_time(file_path: str) -> str:
 
 
 def build_session_picker(
-    sessions: list[ClaudeSession],
+    sessions: list[AgentSession],
 ) -> tuple[str, InlineKeyboardMarkup]:
-    """Build session picker UI for resuming an existing Claude session.
+    """Build session picker UI for resuming an existing agent session.
 
     Args:
-        sessions: List of ClaudeSession objects (sorted by recency).
+        sessions: List of AgentSession objects (sorted by recency).
 
     Returns: (text, keyboard).
     """
