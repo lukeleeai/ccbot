@@ -47,6 +47,7 @@ from telegram import (
     Update,
 )
 from telegram.constants import ChatAction
+from telegram.error import TimedOut
 from telegram.ext import (
     AIORateLimiter,
     Application,
@@ -155,6 +156,24 @@ CC_COMMANDS: dict[str, str] = {
     "memory": "↗ Edit CLAUDE.md",
     "model": "↗ Switch AI model",
 }
+
+
+async def safe_send_typing_action(update: Update) -> None:
+    """Typing indicator should not fail the main message flow."""
+    if not update.message:
+        return
+
+    try:
+        await update.message.chat.send_action(ChatAction.TYPING)
+    except TimedOut:
+        logger.warning("Timed out sending typing indicator")
+
+
+async def on_application_error(
+    update: object, context: ContextTypes.DEFAULT_TYPE
+) -> None:
+    """Log unexpected handler failures through ccbot's logger."""
+    logger.exception("Unhandled Telegram handler error", exc_info=context.error)
 
 
 def is_user_allowed(user_id: int | None) -> bool:
@@ -520,7 +539,7 @@ async def forward_command_handler(
     logger.info(
         "Forwarding command %s to window %s (user=%d)", cc_slash, display, user.id
     )
-    await update.message.chat.send_action(ChatAction.TYPING)
+    await safe_send_typing_action(update)
     success, message = await session_manager.send_to_window(wid, cc_slash)
     if success:
         await safe_reply(update.message, f"⚡ [{display}] Sent: {cc_slash}")
@@ -619,7 +638,7 @@ async def photo_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     else:
         text_to_send = f"(image attached: {file_path})"
 
-    await update.message.chat.send_action(ChatAction.TYPING)
+    await safe_send_typing_action(update)
     clear_status_msg_info(user.id, thread_id)
 
     success, message = await session_manager.send_to_window(wid, text_to_send)
@@ -696,7 +715,7 @@ async def voice_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         await safe_reply(update.message, f"⚠ Transcription failed: {e}")
         return
 
-    await update.message.chat.send_action(ChatAction.TYPING)
+    await safe_send_typing_action(update)
     clear_status_msg_info(user.id, thread_id)
 
     success, message = await session_manager.send_to_window(wid, text)
@@ -947,7 +966,7 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         )
         return
 
-    await update.message.chat.send_action(ChatAction.TYPING)
+    await safe_send_typing_action(update)
     await enqueue_status_update(context.bot, user.id, wid, None, thread_id=thread_id)
 
     # Cancel any running bash capture — new message pushes pane content down
@@ -1923,5 +1942,6 @@ def create_bot() -> Application:
             unsupported_content_handler,
         )
     )
+    application.add_error_handler(on_application_error)
 
     return application

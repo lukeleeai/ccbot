@@ -84,9 +84,11 @@ class Config:
 
         self.monitor_poll_interval = float(os.getenv("MONITOR_POLL_INTERVAL", "2.0"))
 
-        # Display user messages in history and real-time notifications
-        # When True, user messages are shown with a 👤 prefix
-        self.show_user_messages = True
+        # Display user messages in history and real-time notifications.
+        # Default off to avoid echoing the user's own Telegram messages back.
+        self.show_user_messages = (
+            os.getenv("CCBOT_SHOW_USER_MESSAGES", "").lower() == "true"
+        )
 
         # Show hidden (dot) directories in directory browser
         self.show_hidden_dirs = (
